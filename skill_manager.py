@@ -217,6 +217,15 @@ class SkillManager:
                 continue
             return self._load_skill_from_path(file_path, inferred_name)
         return None
+
+    def _load_from_skill_manifest(self, skill_name: str, directory: Path) -> Optional[Skill]:
+        """从 SKILL.md (目录级) 加载技能"""
+        for skill_file in directory.rglob("SKILL.md"):
+            fallback_name = skill_file.parent.name
+            inferred_name = self._infer_skill_name_from_md(skill_file, fallback_name)
+            if inferred_name == skill_name:
+                return self._load_skill_from_md(skill_file, inferred_name)
+        return None
     
     def load_all_skills(self, source: str = "auto") -> List[Skill]:
         """
