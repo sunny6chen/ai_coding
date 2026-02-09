@@ -88,6 +88,18 @@ class SkillManager:
         except Exception as e:
             logger.warning(f"读取 skill 名称失败 {file_path}: {e}")
         return fallback_name
+
+    def _infer_skill_name_from_json(self, file_path: Path, fallback_name: str) -> str:
+        """从 JSON 文件推断技能名称（优先 name 字段）"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            name = data.get('name')
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        except Exception as e:
+            logger.warning(f"读取 skill 名称失败 {file_path}: {e}")
+        return fallback_name
     
     def _load_skill_from_md(self, file_path: Path, skill_name: str) -> Skill:
         """
@@ -188,20 +200,22 @@ class SkillManager:
         if not directory or not directory.exists():
             return None
         
-        # 支持 .md 和 .json 格式
-        skill_file_md = directory / f"{skill_name}.md"
-        skill_file_json = directory / f"{skill_name}.json"
-        
         try:
-            if skill_file_md.exists():
-                return self._load_skill_from_md(skill_file_md, skill_name)
-            elif skill_file_json.exists():
-                return self._load_skill_from_json(skill_file_json, skill_name)
-            else:
-                return self._load_from_skill_manifest(skill_name, directory)
+            return self._find_skill_in_directory(skill_name, directory)
         except Exception as e:
             logger.error(f"加载 skill 失败 {skill_name}: {e}")
-        
+            return None
+
+    def _find_skill_in_directory(self, skill_name: str, directory: Path) -> Optional[Skill]:
+        """按名称从目录中查找技能（支持前置名与 frontmatter）"""
+        for file_path, fallback_name in self._iter_skill_files(directory):
+            if file_path.suffix == ".md":
+                inferred_name = self._infer_skill_name_from_md(file_path, fallback_name)
+            else:
+                inferred_name = self._infer_skill_name_from_json(file_path, fallback_name)
+            if inferred_name != skill_name:
+                continue
+            return self._load_skill_from_path(file_path, inferred_name)
         return None
 
     def _load_from_skill_manifest(self, skill_name: str, directory: Path) -> Optional[Skill]:
@@ -449,7 +463,7 @@ class SkillManager:
             if file_path.suffix == ".md":
                 skill_names.add(self._infer_skill_name_from_md(file_path, fallback_name))
             else:
-                skill_names.add(fallback_name)
+                skill_names.add(self._infer_skill_name_from_json(file_path, fallback_name))
 
         return list(skill_names)
     
@@ -480,7 +494,7 @@ class SkillManager:
                     if file_path.suffix == ".md":
                         inferred_name = self._infer_skill_name_from_md(file_path, fallback_name)
                     else:
-                        inferred_name = fallback_name
+                        inferred_name = self._infer_skill_name_from_json(file_path, fallback_name)
                     if inferred_name != skill_name:
                         continue
                     stat = file_path.stat()
