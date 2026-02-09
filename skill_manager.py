@@ -76,6 +76,30 @@ class SkillManager:
         
         # 没有 frontmatter，整个内容作为 markdown
         return {}, content
+
+    def _infer_skill_name_from_md(self, file_path: Path, fallback_name: str) -> str:
+        """从 Markdown 文件推断技能名称（优先 frontmatter.name）"""
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            frontmatter, _ = self._parse_yaml_frontmatter(content)
+            name = frontmatter.get('name')
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        except Exception as e:
+            logger.warning(f"读取 skill 名称失败 {file_path}: {e}")
+        return fallback_name
+
+    def _infer_skill_name_from_json(self, file_path: Path, fallback_name: str) -> str:
+        """从 JSON 文件推断技能名称（优先 name 字段）"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            name = data.get('name')
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        except Exception as e:
+            logger.warning(f"读取 skill 名称失败 {file_path}: {e}")
+        return fallback_name
     
     def _load_skill_from_md(self, file_path: Path, skill_name: str) -> Skill:
         """
@@ -120,6 +144,18 @@ class SkillManager:
             data['name'] = skill_name
         
         return Skill(**data)
+
+    def _load_skill_from_path(self, file_path: Path, fallback_name: str) -> Optional[Skill]:
+        """根据文件路径加载技能"""
+        try:
+            if file_path.suffix == ".md":
+                skill_name = self._infer_skill_name_from_md(file_path, fallback_name)
+                return self._load_skill_from_md(file_path, skill_name)
+            if file_path.suffix == ".json":
+                return self._load_skill_from_json(file_path, fallback_name)
+        except Exception as e:
+            logger.error(f"加载 skill 失败 {file_path}: {e}")
+        return None
     
     def load_skill(self, skill_name: str, source: str = "auto") -> Optional[Skill]:
         """
@@ -164,18 +200,22 @@ class SkillManager:
         if not directory or not directory.exists():
             return None
         
-        # 支持 .md 和 .json 格式
-        skill_file_md = directory / f"{skill_name}.md"
-        skill_file_json = directory / f"{skill_name}.json"
-        
         try:
-            if skill_file_md.exists():
-                return self._load_skill_from_md(skill_file_md, skill_name)
-            elif skill_file_json.exists():
-                return self._load_skill_from_json(skill_file_json, skill_name)
+            return self._find_skill_in_directory(skill_name, directory)
         except Exception as e:
             logger.error(f"加载 skill 失败 {skill_name}: {e}")
-        
+            return None
+
+    def _find_skill_in_directory(self, skill_name: str, directory: Path) -> Optional[Skill]:
+        """按名称从目录中查找技能（支持前置名与 frontmatter）"""
+        for file_path, fallback_name in self._iter_skill_files(directory):
+            if file_path.suffix == ".md":
+                inferred_name = self._infer_skill_name_from_md(file_path, fallback_name)
+            else:
+                inferred_name = self._infer_skill_name_from_json(file_path, fallback_name)
+            if inferred_name != skill_name:
+                continue
+            return self._load_skill_from_path(file_path, inferred_name)
         return None
     
     def load_all_skills(self, source: str = "auto") -> List[Skill]:
@@ -214,36 +254,46 @@ class SkillManager:
             return []
         
         skills = []
-        
-        # 需要排除的非 skill 文件
-        _excluded_names = {'README', 'CHANGELOG', 'LICENSE', 'CONTRIBUTING'}
-        
-        # 加载所有 .md 和 .json 文件
+        seen_names = set()
+        skill_files = self._iter_skill_files(directory)
+
+        for file_path, fallback_name in skill_files:
+            skill = self._load_skill_from_path(file_path, fallback_name)
+            if not skill:
+                continue
+            skill_name = skill.get('name')
+            if not skill_name or skill_name in seen_names:
+                continue
+            skills.append(skill)
+            seen_names.add(skill_name)
+
+        return skills
+
+    def _iter_skill_files(self, directory: Path) -> List[tuple[Path, str]]:
+        """枚举技能文件（根目录文件 + 子目录 SKILL.md）"""
+        if not directory.exists():
+            return []
+
+        skill_files: List[tuple[Path, str]] = []
+        excluded_names = {'README', 'CHANGELOG', 'LICENSE', 'CONTRIBUTING'}
+
         for file_path in directory.glob("*.md"):
             skill_name = file_path.stem
-            if skill_name.upper() in _excluded_names:
+            if skill_name.upper() in excluded_names or file_path.name == "SKILL.md":
                 continue
-            try:
-                skill = self._load_skill_from_md(file_path, skill_name)
-                if skill:
-                    skills.append(skill)
-            except Exception as e:
-                logger.error(f"加载 skill 失败 {skill_name}: {e}")
-        
+            skill_files.append((file_path, skill_name))
+
         for file_path in directory.glob("*.json"):
             skill_name = file_path.stem
-            if skill_name.upper() in _excluded_names:
+            if skill_name.upper() in excluded_names:
                 continue
-            # 避免重复（优先 .md）
-            if not any(s['name'] == skill_name for s in skills):
-                try:
-                    skill = self._load_skill_from_json(file_path, skill_name)
-                    if skill:
-                        skills.append(skill)
-                except Exception as e:
-                    logger.error(f"加载 skill 失败 {skill_name}: {e}")
-        
-        return skills
+            skill_files.append((file_path, skill_name))
+
+        for file_path in directory.rglob("SKILL.md"):
+            fallback_name = file_path.parent.name
+            skill_files.append((file_path, fallback_name))
+
+        return skill_files
     
     def save_skill(
         self, 
@@ -398,18 +448,14 @@ class SkillManager:
         """列出目录中的所有技能"""
         if not directory.exists():
             return []
-        
-        _excluded_names = {'README', 'CHANGELOG', 'LICENSE', 'CONTRIBUTING'}
+
         skill_names = set()
-        
-        for file_path in directory.glob("*.md"):
-            if file_path.stem.upper() not in _excluded_names:
-                skill_names.add(file_path.stem)
-        
-        for file_path in directory.glob("*.json"):
-            if file_path.stem.upper() not in _excluded_names:
-                skill_names.add(file_path.stem)
-        
+        for file_path, fallback_name in self._iter_skill_files(directory):
+            if file_path.suffix == ".md":
+                skill_names.add(self._infer_skill_name_from_md(file_path, fallback_name))
+            else:
+                skill_names.add(self._infer_skill_name_from_json(file_path, fallback_name))
+
         return list(skill_names)
     
     def get_skill_info(self, skill_name: str, source: str = "auto") -> Optional[Dict[str, Any]]:
@@ -433,28 +479,22 @@ class SkillManager:
         for src, directory in directories:
             if not directory.exists():
                 continue
-            
-            skill_file_md = directory / f"{skill_name}.md"
-            skill_file_json = directory / f"{skill_name}.json"
-            
+
             try:
-                if skill_file_md.exists():
-                    stat = skill_file_md.stat()
+                for file_path, fallback_name in self._iter_skill_files(directory):
+                    if file_path.suffix == ".md":
+                        inferred_name = self._infer_skill_name_from_md(file_path, fallback_name)
+                    else:
+                        inferred_name = self._infer_skill_name_from_json(file_path, fallback_name)
+                    if inferred_name != skill_name:
+                        continue
+                    stat = file_path.stat()
                     return {
-                        "name": skill_name,
-                        "format": "md",
+                        "name": inferred_name,
+                        "format": "md" if file_path.suffix == ".md" else "json",
                         "source": src,
                         "size": stat.st_size,
-                        "path": str(skill_file_md)
-                    }
-                elif skill_file_json.exists():
-                    stat = skill_file_json.stat()
-                    return {
-                        "name": skill_name,
-                        "format": "json",
-                        "source": src,
-                        "size": stat.st_size,
-                        "path": str(skill_file_json)
+                        "path": str(file_path)
                     }
             except Exception as e:
                 logger.error(f"获取 skill 信息失败: {e}")
@@ -672,4 +712,3 @@ tool.execute(param1="value1", param2="value2")
         stats["total_size_kb"] = round(total_size / 1024, 2)
         
         return stats
-
